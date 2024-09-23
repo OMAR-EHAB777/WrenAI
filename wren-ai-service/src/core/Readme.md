@@ -1,6 +1,6 @@
 ## Core Layer Diagram
 
-![Core Layer Architecture](./Core_Layer_Architecture.drawio.png)
+![Core Layer Architecture](./docs/Core_Layer_Architecture.png)
 1. engine.py
 
 The engine.py file seems to contain the main engine logic for handling SQL-related processing in Wren AI. Below are the important components:
