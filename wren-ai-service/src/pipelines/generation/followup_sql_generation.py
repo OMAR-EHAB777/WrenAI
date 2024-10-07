@@ -9,9 +9,12 @@ from hamilton.experimental.h_async import AsyncDriver
 from haystack.components.builders.prompt_builder import PromptBuilder
 from langfuse.decorators import observe
 
+# Import core components such as engine, pipeline, and provider
 from src.core.engine import Engine
 from src.core.pipeline import BasicPipeline
 from src.core.provider import LLMProvider
+
+# Import common functions and constants used in SQL generation
 from src.pipelines.common import (
     TEXT_TO_SQL_RULES,
     SQLGenPostProcessor,
@@ -20,9 +23,10 @@ from src.pipelines.common import (
 from src.utils import async_timer, timer
 from src.web.v1.services.ask import AskHistory
 
+# Set up logging for debugging
 logger = logging.getLogger("wren-ai-service")
 
-
+# Template for generating SQL queries from follow-up questions, using previous query context
 text_to_sql_with_followup_user_prompt_template = """
 ### TASK ###
 Given the following user's follow-up question and previous SQL query and summary,
@@ -121,8 +125,13 @@ Let's think step by step.
 
 
 ## Start of Pipeline
+
+
+## Pipeline starts here
+
+# This function generates a prompt for SQL generation using the given inputs
 @timer
-@observe(capture_input=False)
+@observe(capture_input=False)  # Observes the prompt generation without capturing input data
 def prompt(
     query: str,
     documents: List[str],
@@ -130,6 +139,19 @@ def prompt(
     alert: str,
     prompt_builder: PromptBuilder,
 ) -> dict:
+    """
+    Builds the final prompt for the follow-up SQL generation task.
+    
+    Args:
+        query (str): User's follow-up question.
+        documents (List[str]): Database schema or documents.
+        history (AskHistory): Previous SQL query and its summary.
+        alert (str): Text-to-SQL rules or alerts to include.
+        prompt_builder (PromptBuilder): Component to build the prompt.
+    
+    Returns:
+        dict: The generated prompt.
+    """
     logger.debug(f"query: {query}")
     logger.debug(f"documents: {documents}")
     logger.debug(f"history: {history}")
@@ -137,14 +159,24 @@ def prompt(
         query=query, documents=documents, history=history, alert=alert
     )
 
-
+# This function asynchronously generates SQL queries based on the provided prompt
 @async_timer
 @observe(as_type="generation", capture_input=False)
 async def generate_sql_in_followup(prompt: dict, generator: Any) -> dict:
+    """
+    Asynchronously generates SQL queries based on the prompt.
+    
+    Args:
+        prompt (dict): The prompt generated for SQL generation.
+        generator (Any): The model component responsible for generating SQL.
+    
+    Returns:
+        dict: The generated SQL queries in a dictionary.
+    """
     logger.debug(f"prompt: {orjson.dumps(prompt, option=orjson.OPT_INDENT_2).decode()}")
     return await generator.run(prompt=prompt.get("prompt"))
 
-
+# This function post-processes the generated SQL queries to refine or validate them
 @async_timer
 @observe(capture_input=False)
 async def post_process(
@@ -152,6 +184,17 @@ async def post_process(
     post_processor: SQLGenPostProcessor,
     project_id: str | None = None,
 ) -> dict:
+    """
+    Post-processes the generated SQL queries for refinement or validation.
+    
+    Args:
+        generate_sql_in_followup (dict): The SQL queries generated.
+        post_processor (SQLGenPostProcessor): Component responsible for post-processing.
+        project_id (str | None): Optional project ID for tracking.
+    
+    Returns:
+        dict: The post-processed SQL queries.
+    """
     logger.debug(
         f"generate_sql_in_followup: {orjson.dumps(generate_sql_in_followup, option=orjson.OPT_INDENT_2).decode()}"
     )
@@ -159,16 +202,23 @@ async def post_process(
         generate_sql_in_followup.get("replies"), project_id=project_id
     )
 
+## End of pipeline
 
-## End of Pipeline
-
-
+# This class implements the follow-up SQL generation pipeline
 class FollowUpSQLGeneration(BasicPipeline):
     def __init__(
         self,
         llm_provider: LLMProvider,
         engine: Engine,
     ):
+        """
+        Initializes the Follow-Up SQL Generation pipeline with necessary components.
+        
+        Args:
+            llm_provider (LLMProvider): Provider for the language model used in generation.
+            engine (Engine): Engine for executing or validating SQL queries.
+        """
+        # Set up the components required for SQL generation and post-processing
         self._components = {
             "generator": llm_provider.get_generator(
                 system_prompt=sql_generation_system_prompt
@@ -179,14 +229,17 @@ class FollowUpSQLGeneration(BasicPipeline):
             "post_processor": SQLGenPostProcessor(engine=engine),
         }
 
+        # Configuration for the pipeline
         self._configs = {
             "alert": TEXT_TO_SQL_RULES,
         }
 
+        # Initialize the base pipeline class with an async driver
         super().__init__(
             AsyncDriver({}, sys.modules[__name__], result_builder=base.DictResult())
         )
 
+    # This method visualizes the pipeline execution process
     def visualize(
         self,
         query: str,
@@ -194,6 +247,15 @@ class FollowUpSQLGeneration(BasicPipeline):
         history: AskHistory,
         project_id: str | None = None,
     ) -> None:
+        """
+        Visualizes the execution of the pipeline using a DOT file format.
+        
+        Args:
+            query (str): The follow-up query from the user.
+            contexts (List[str]): Database schema or relevant documents.
+            history (AskHistory): Previous SQL query history.
+            project_id (str | None): Optional project ID for tracking.
+        """
         destination = "outputs/pipelines/generation"
         if not Path(destination).exists():
             Path(destination).mkdir(parents=True, exist_ok=True)
@@ -213,6 +275,7 @@ class FollowUpSQLGeneration(BasicPipeline):
             orient="LR",
         )
 
+    # This method runs the entire follow-up SQL generation pipeline asynchronously
     @async_timer
     @observe(name="Follow-Up SQL Generation")
     async def run(
@@ -222,6 +285,18 @@ class FollowUpSQLGeneration(BasicPipeline):
         history: AskHistory,
         project_id: str | None = None,
     ):
+        """
+        Executes the follow-up SQL generation pipeline.
+        
+        Args:
+            query (str): The follow-up query from the user.
+            contexts (List[str]): Database schema or relevant documents.
+            history (AskHistory): Previous SQL query history.
+            project_id (str | None): Optional project ID for tracking.
+        
+        Returns:
+            dict: The final SQL queries generated by the pipeline.
+        """
         logger.info("Follow-Up SQL Generation pipeline is running...")
         return await self._pipe.execute(
             ["post_process"],
@@ -235,25 +310,29 @@ class FollowUpSQLGeneration(BasicPipeline):
             },
         )
 
-
+# Main execution block for testing and debugging
 if __name__ == "__main__":
     from langfuse.decorators import langfuse_context
-
     from src.core.engine import EngineConfig
     from src.core.pipeline import async_validate
     from src.utils import init_langfuse, init_providers, load_env_vars
 
+    # Initialize environment variables, logging, and providers
     load_env_vars()
     init_langfuse()
 
+    # Initialize the language model provider and engine
     llm_provider, _, _, engine = init_providers(engine_config=EngineConfig())
     pipeline = FollowUpSQLGeneration(llm_provider=llm_provider, engine=engine)
 
+    # Visualize the pipeline for testing
     pipeline.visualize(
         "this is a test query",
         [],
         AskHistory(sql="SELECT * FROM table", summary="Summary", steps=[]),
     )
+    
+    # Run the pipeline with a test follow-up query
     async_validate(
         lambda: pipeline.run(
             "this is a test query",
@@ -262,4 +341,5 @@ if __name__ == "__main__":
         )
     )
 
+    # Flush the context for observability
     langfuse_context.flush()
