@@ -13,6 +13,8 @@ from src.providers.loader import provider, pull_ollama_model
 from src.utils import remove_trailing_slash
 
 logger = logging.getLogger("wren-ai-service")
+# This file implements an Ollama-based Language Model (LLM) provider for generating text responses.
+# It defines the AsyncGenerator and OllamaLLMProvider classes, which handle communication with the Ollama API.
 
 LLM_OLLAMA_URL = "http://localhost:11434"
 GENERATION_MODEL = "gemma2:9b"
@@ -20,7 +22,7 @@ GENERATION_MODEL_KWARGS = {
     "temperature": 0,
 }
 
-
+# AsyncGenerator class handles text generation requests using the Ollama API.
 @component
 class AsyncGenerator(OllamaGenerator):
     def __init__(
@@ -45,10 +47,8 @@ class AsyncGenerator(OllamaGenerator):
             streaming_callback=streaming_callback,
         )
 
+    # Handles streaming responses by processing each chunk received from the Ollama API.
     async def _handle_streaming_response(self, response) -> List[StreamingChunk]:
-        """
-        Handles Streaming response cases
-        """
         chunks: List[StreamingChunk] = []
         for chunk in await response.iter_lines():
             chunk_delta: StreamingChunk = self._build_chunk(chunk)
@@ -57,13 +57,10 @@ class AsyncGenerator(OllamaGenerator):
                 self.streaming_callback(chunk_delta)
         return chunks
 
+    # Converts the Ollama API response into a format compatible with the framework.
     async def _convert_to_response(
         self, ollama_response: aiohttp.ClientResponse
     ) -> Dict[str, List[Any]]:
-        """
-        Converts a response from the Ollama API to the required Haystack format.
-        """
-
         resp_dict = await ollama_response.json()
 
         replies = [resp_dict["response"]]
@@ -71,24 +68,23 @@ class AsyncGenerator(OllamaGenerator):
 
         return {"replies": replies, "meta": [meta]}
 
+    # Creates a JSON payload for sending requests to the Ollama API.
     def _create_json_payload(
         self, prompt: str, stream: bool, generation_kwargs=None
     ) -> Dict[str, Any]:
-        """
-        Returns a dictionary of JSON arguments for a POST request to an Ollama service.
-        """
         generation_kwargs = generation_kwargs or {}
         return {
             "prompt": prompt,
             "model": self.model,
             "stream": stream,
             "raw": self.raw,
-            "format": "json",  # https://github.com/ollama/ollama/blob/main/docs/api.md#request-json-mode
+            "format": "json",
             "template": self.template,
             "system": self.system_prompt,
             "options": generation_kwargs,
         }
 
+    # Runs the text generation process and interacts with the Ollama API.
     @component.output_types(replies=List[str], meta=List[Dict[str, Any]])
     async def run(
         self,
@@ -98,9 +94,7 @@ class AsyncGenerator(OllamaGenerator):
         logger.debug(f"Running Ollama generator with prompt: {prompt}")
 
         generation_kwargs = {**self.generation_kwargs, **(generation_kwargs or {})}
-
         stream = self.streaming_callback is not None
-
         json_payload = self._create_json_payload(prompt, stream, generation_kwargs)
 
         async with aiohttp.ClientSession(
@@ -120,6 +114,7 @@ class AsyncGenerator(OllamaGenerator):
             return await self._convert_to_response(response)
 
 
+# OllamaLLMProvider class serves as a provider for the Ollama language model.
 @provider("ollama_llm")
 class OllamaLLMProvider(LLMProvider):
     def __init__(
@@ -145,6 +140,7 @@ class OllamaLLMProvider(LLMProvider):
         logger.info(f"Using Ollama LLM: {self._generation_model}")
         logger.info(f"Using Ollama URL: {self._url}")
 
+    # Creates and returns an AsyncGenerator instance for text generation tasks.
     def get_generator(
         self,
         system_prompt: Optional[str] = None,

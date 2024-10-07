@@ -11,13 +11,19 @@ from src.providers.loader import provider
 
 logger = logging.getLogger("wren-ai-service")
 
+# This file defines multiple providers for different Wren engine services (WrenUI, WrenIbis, and WrenEngine).
+# These providers are responsible for executing SQL queries, each interacting with a different endpoint or service.
+# The purpose of these classes is to handle various SQL operations by interacting with Wren's specific APIs.
 
+# Provider class for WrenUI engine, which executes SQL through a GraphQL API.
 @provider("wren_ui")
 class WrenUI(Engine):
     def __init__(self, endpoint: str = os.getenv("WREN_UI_ENDPOINT")):
         self._endpoint = endpoint
         logger.info("Using Engine: wren_ui")
 
+    # This method executes SQL queries asynchronously. 
+    # It sends a GraphQL mutation to the Wren UI API endpoint to run or preview the SQL query.
     async def execute_sql(
         self,
         sql: str,
@@ -26,6 +32,7 @@ class WrenUI(Engine):
         dry_run: bool = True,
         **kwargs,
     ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        # Prepares the payload with the SQL query and optionally sets it to dry-run mode (with a limit of 1).
         data = {
             "sql": remove_limit_statement(sql),
             "projectId": project_id,
@@ -36,6 +43,7 @@ class WrenUI(Engine):
         else:
             data["limit"] = 500
 
+        # Sends the request to the Wren UI GraphQL API for execution or preview of the SQL query.
         async with session.post(
             f"{self._endpoint}/api/graphql",
             json={
@@ -53,6 +61,7 @@ class WrenUI(Engine):
             )
 
 
+# Provider class for WrenIbis engine, which runs SQL queries against the Wren Ibis engine using REST endpoints.
 @provider("wren_ibis")
 class WrenIbis(Engine):
     def __init__(
@@ -72,6 +81,8 @@ class WrenIbis(Engine):
         self._connection_info = connection_info
         logger.info("Using Engine: wren_ibis")
 
+    # Executes SQL queries asynchronously against the Wren Ibis engine. 
+    # Supports dry-run and full-query execution modes.
     async def execute_sql(
         self,
         sql: str,
@@ -106,12 +117,15 @@ class WrenIbis(Engine):
             return False, None, res
 
 
+# Provider class for WrenEngine, which provides access to Wren's main SQL execution engine.
 @provider("wren_engine")
 class WrenEngine(Engine):
     def __init__(self, endpoint: str = os.getenv("WREN_ENGINE_ENDPOINT")):
         self._endpoint = endpoint
         logger.info("Using Engine: wren_engine")
 
+    # Executes SQL queries asynchronously using the Wren engine. 
+    # Queries are executed in either dry-run mode or full-query mode.
     async def execute_sql(
         self,
         sql: str,
@@ -122,12 +136,14 @@ class WrenEngine(Engine):
         dry_run: bool = True,
         **kwargs,
     ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        # Constructs the correct API endpoint based on the type of execution (dry-run or full-run).
         api_endpoint = (
             f"{self._endpoint}/v1/mdl/dry-run"
             if dry_run
             else f"{self._endpoint}/v1/mdl/preview"
         )
 
+        # Sends the SQL query to the API for execution.
         async with session.get(
             api_endpoint,
             json={

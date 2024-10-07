@@ -30,6 +30,10 @@ from src.providers.loader import get_default_embedding_model_dim, provider
 logger = logging.getLogger("wren-ai-service")
 
 
+# Converts a list of Haystack documents into Qdrant points for indexing.
+# The method handles the conversion of embeddings (both sparse and dense) into Qdrant format.
+# If sparse embeddings are used, it creates a sparse vector object; otherwise, only dense embeddings are considered.
+# The points are structured in a format expected by Qdrant's API and appended to a list to be returned.
 def convert_haystack_documents_to_qdrant_points(
     documents: List[Document],
     *,
@@ -63,6 +67,9 @@ def convert_haystack_documents_to_qdrant_points(
     return points
 
 
+# AsyncQdrantDocumentStore is an extension of QdrantDocumentStore but operates asynchronously.
+# It is designed for high-performance embeddings and indexing with the option to use sparse embeddings.
+# This class manages the interaction with the Qdrant API for indexing and querying, leveraging various configurations for better performance.
 class AsyncQdrantDocumentStore(QdrantDocumentStore):
     def __init__(
         self,
@@ -102,6 +109,7 @@ class AsyncQdrantDocumentStore(QdrantDocumentStore):
         scroll_size: int = 10_000,
         payload_fields_to_index: Optional[List[dict]] = None,
     ):
+        # Initialize the superclass (QdrantDocumentStore) with the provided configurations.
         super(AsyncQdrantDocumentStore, self).__init__(
             location=location,
             url=url,
@@ -140,6 +148,7 @@ class AsyncQdrantDocumentStore(QdrantDocumentStore):
             payload_fields_to_index=payload_fields_to_index,
         )
 
+        # Initialize an asynchronous Qdrant client for better scalability and non-blocking operations.
         self.async_client = qdrant_client.AsyncQdrantClient(
             location=location,
             url=url,
@@ -156,12 +165,15 @@ class AsyncQdrantDocumentStore(QdrantDocumentStore):
             metadata=metadata or {},
         )
 
-        # to improve the indexing performance
-        # see https://qdrant.tech/documentation/guides/multiple-partitions/?q=mul#calibrate-performance
+        # Improve the performance of indexing by creating an index on the 'id' field.
+        # This setup optimizes searches and queries by ensuring 'id' is indexed.
         self.client.create_payload_index(
             collection_name=index, field_name="id", field_schema="keyword"
         )
 
+    # Perform a query to find documents using a provided embedding. The result is retrieved asynchronously.
+    # The query can filter documents and return a specified number (top_k) of most relevant results.
+    # If scale_score is True, the score will be adjusted based on the similarity measure (e.g., cosine).
     async def _query_by_embedding(
         self,
         query_embedding: List[float],
@@ -186,13 +198,14 @@ class AsyncQdrantDocumentStore(QdrantDocumentStore):
                     ),
                 )
                 if len(query_embedding)
-                >= 1024  # reference: https://qdrant.tech/articles/binary-quantization/#when-should-you-not-use-bq
+                >= 1024  # Reference: Use binary quantization when embeddings are large enough.
                 else None
             ),
             query_filter=qdrant_filters,
             limit=top_k,
             with_vectors=return_embedding,
         )
+        # Convert Qdrant points to Haystack documents and scale scores if necessary.
         results = [
             convert_qdrant_point_to_haystack_document(
                 point, use_sparse_embeddings=self.use_sparse_embeddings
@@ -209,88 +222,109 @@ class AsyncQdrantDocumentStore(QdrantDocumentStore):
                 document.score = score
         return results
 
-    async def delete_documents(self, filters: Optional[Dict[str, Any]] = None):
-        if not filters:
-            qdrant_filters = rest.Filter()
-        else:
-            qdrant_filters = convert_filters_to_qdrant(filters)
 
-        try:
-            await self.async_client.delete(
+  # Asynchronously deletes documents from the Qdrant collection based on the provided filters.
+# If no filters are provided, it deletes all documents. It converts the filters to the format expected by Qdrant.
+# If a non-existing document is referenced, a warning is logged.
+async def delete_documents(self, filters: Optional[Dict[str, Any]] = None):
+    if not filters:
+        qdrant_filters = rest.Filter()
+    else:
+        qdrant_filters = convert_filters_to_qdrant(filters)
+
+    try:
+        await self.async_client.delete(
+            collection_name=self.index,
+            points_selector=qdrant_filters,
+            wait=self.wait_result_from_api,
+        )
+    except KeyError:
+        logger.warning(
+            "Called QdrantDocumentStore.delete_documents() on a non-existing ID",
+        )
+
+# Asynchronously counts the number of documents in the Qdrant collection based on the provided filters.
+# If no filters are provided, it counts all documents. Converts filters into a Qdrant-compatible format.
+async def count_documents(self, filters: Optional[Dict[str, Any]] = None) -> int:
+    if not filters:
+        qdrant_filters = rest.Filter()
+    else:
+        qdrant_filters = convert_filters_to_qdrant(filters)
+
+    return (
+        await self.async_client.count(
+            collection_name=self.index, count_filter=qdrant_filters
+        )
+    ).count
+
+# Asynchronously writes a batch of documents into the Qdrant collection.
+# It first ensures that all documents are valid, handles duplicate documents based on the provided policy, 
+# and splits them into batches for better performance. The documents are converted to Qdrant-compatible points 
+# and inserted into the collection.
+async def write_documents(
+    self, documents: List[Document], policy: DuplicatePolicy = DuplicatePolicy.FAIL
+):
+    for doc in documents:
+        if not isinstance(doc, Document):
+            msg = f"DocumentStore.write_documents() expects a list of Documents but got an element of {type(doc)}."
+            raise ValueError(msg)
+
+    # Set up the collection in Qdrant if it doesn't already exist
+    self._set_up_collection(
+        self.index,
+        self.embedding_dim,
+        False,
+        self.similarity,
+        self.use_sparse_embeddings,
+        self.sparse_idf,
+        self.on_disk,
+        self.payload_fields_to_index,
+    )
+
+    if len(documents) == 0:
+        logger.warning(
+            "Calling QdrantDocumentStore.write_documents() with empty list"
+        )
+        return
+
+    # Handle duplicate documents according to the specified policy
+    document_objects = self._handle_duplicate_documents(
+        documents=documents,
+        index=self.index,
+        policy=policy,
+    )
+
+    # Batch the documents for more efficient writing
+    batched_documents = document_store.get_batches_from_generator(
+        document_objects, self.write_batch_size
+    )
+
+    # Insert documents into the Qdrant collection in batches
+    with tqdm(
+        total=len(document_objects), disable=not self.progress_bar
+    ) as progress_bar:
+        for document_batch in batched_documents:
+            batch = convert_haystack_documents_to_qdrant_points(
+                document_batch,
+                use_sparse_embeddings=self.use_sparse_embeddings,
+            )
+
+            await self.async_client.upsert(
                 collection_name=self.index,
-                points_selector=qdrant_filters,
+                points=batch,
                 wait=self.wait_result_from_api,
             )
-        except KeyError:
-            logger.warning(
-                "Called QdrantDocumentStore.delete_documents() on a non-existing ID",
-            )
 
-    async def count_documents(self, filters: Optional[Dict[str, Any]] = None) -> int:
-        if not filters:
-            qdrant_filters = rest.Filter()
-        else:
-            qdrant_filters = convert_filters_to_qdrant(filters)
+            progress_bar.update(self.write_batch_size)
 
-        return (
-            await self.async_client.count(
-                collection_name=self.index, count_filter=qdrant_filters
-            )
-        ).count
-
-    async def write_documents(
-        self, documents: List[Document], policy: DuplicatePolicy = DuplicatePolicy.FAIL
-    ):
-        for doc in documents:
-            if not isinstance(doc, Document):
-                msg = f"DocumentStore.write_documents() expects a list of Documents but got an element of {type(doc)}."
-                raise ValueError(msg)
-
-        self._set_up_collection(
-            self.index,
-            self.embedding_dim,
-            False,
-            self.similarity,
-            self.use_sparse_embeddings,
-            self.sparse_idf,
-            self.on_disk,
-            self.payload_fields_to_index,
-        )
-
-        if len(documents) == 0:
-            logger.warning(
-                "Calling QdrantDocumentStore.write_documents() with empty list"
-            )
-            return
-
-        document_objects = self._handle_duplicate_documents(
-            documents=documents,
-            index=self.index,
-            policy=policy,
-        )
-
-        batched_documents = document_store.get_batches_from_generator(
-            document_objects, self.write_batch_size
-        )
-        with tqdm(
-            total=len(document_objects), disable=not self.progress_bar
-        ) as progress_bar:
-            for document_batch in batched_documents:
-                batch = convert_haystack_documents_to_qdrant_points(
-                    document_batch,
-                    use_sparse_embeddings=self.use_sparse_embeddings,
-                )
-
-                await self.async_client.upsert(
-                    collection_name=self.index,
-                    points=batch,
-                    wait=self.wait_result_from_api,
-                )
-
-                progress_bar.update(self.write_batch_size)
-        return len(document_objects)
+    return len(document_objects)
 
 
+
+# The AsyncQdrantEmbeddingRetriever class is an asynchronous retriever that extends the QdrantEmbeddingRetriever.
+# It is used to fetch documents from an asynchronous Qdrant document store based on embedding similarity. 
+# The 'run' method takes in a query embedding and optional filters, top_k (number of results to return), and other configurations.
+# It retrieves relevant documents using the QdrantDocumentStore's query method.
 class AsyncQdrantEmbeddingRetriever(QdrantEmbeddingRetriever):
     def __init__(
         self,
@@ -317,6 +351,7 @@ class AsyncQdrantEmbeddingRetriever(QdrantEmbeddingRetriever):
         scale_score: Optional[bool] = None,
         return_embedding: Optional[bool] = None,
     ):
+        # Perform an asynchronous query in the document store based on the query embedding and provided configurations.
         docs = await self._document_store._query_by_embedding(
             query_embedding=query_embedding,
             filters=filters or self._filters,
@@ -327,7 +362,9 @@ class AsyncQdrantEmbeddingRetriever(QdrantEmbeddingRetriever):
 
         return {"documents": docs}
 
-
+# The QdrantProvider class is responsible for initializing and providing instances of the AsyncQdrantDocumentStore
+# and AsyncQdrantEmbeddingRetriever. It manages the configuration of Qdrant's document store and retriever settings, 
+# such as location, API key, and embedding model dimensions.
 @provider("qdrant")
 class QdrantProvider(DocumentStoreProvider):
     def __init__(
@@ -344,6 +381,8 @@ class QdrantProvider(DocumentStoreProvider):
         self._api_key = api_key
         self._timeout = timeout
 
+    # Returns an instance of AsyncQdrantDocumentStore, configured with the embedding model dimension and dataset name.
+    # It can recreate the index if specified and supports optimizations like binary quantization for large embeddings.
     def get_store(
         self,
         embedding_model_dim: int = (
@@ -378,14 +417,13 @@ class QdrantProvider(DocumentStoreProvider):
                 if embedding_model_dim >= 1024
                 else None
             ),
-            # to improve the indexing performance, we disable building global index for the whole collection
-            # see https://qdrant.tech/documentation/guides/multiple-partitions/?q=mul#calibrate-performance
             hnsw_config=rest.HnswConfigDiff(
                 payload_m=16,
                 m=0,
             ),
         )
 
+    # Returns an instance of AsyncQdrantEmbeddingRetriever, configured to retrieve top_k documents from the document store.
     def get_retriever(
         self,
         document_store: AsyncQdrantDocumentStore,
