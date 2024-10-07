@@ -1,26 +1,33 @@
+# This script is responsible for breaking down complex SQL queries into smaller, 
+# easier-to-understand steps. It does this by breaking SQL queries that involve joins, 
+# subqueries, and other complex operations into a series of steps that can be easily explained. 
+# Each step includes a partial SQL query, a human-readable summary of that step, 
+# and the name of any CTEs (Common Table Expressions) used. 
+# The goal is to provide an understandable explanation of how a complex SQL query works.
+
 import logging
 import sys
 from pathlib import Path
 from typing import Any
 
-import orjson
-from hamilton import base
-from hamilton.experimental.h_async import AsyncDriver
-from haystack.components.builders.prompt_builder import PromptBuilder
-from langfuse.decorators import observe
+import orjson  # Library for JSON serialization
+from hamilton import base  # Hamilton for declarative pipelines
+from hamilton.experimental.h_async import AsyncDriver  # Async driver for Hamilton
+from haystack.components.builders.prompt_builder import PromptBuilder  # Prompt building
+from langfuse.decorators import observe  # Observability and tracing
 
-from src.core.engine import Engine
-from src.core.pipeline import BasicPipeline, async_validate
-from src.core.provider import LLMProvider
-from src.pipelines.common import SQLBreakdownGenPostProcessor
-from src.utils import (
-    async_timer,
-    timer,
-)
+from src.core.engine import Engine  # Engine class for SQL execution
+from src.core.pipeline import BasicPipeline, async_validate  # Pipeline base class and async validation utility
+from src.core.provider import LLMProvider  # Large Language Model (LLM) provider
+from src.pipelines.common import SQLBreakdownGenPostProcessor  # SQL breakdown post processor
+from src.utils import async_timer, timer  # Utility functions for timing
 
+# Set up a logger for this module
 logger = logging.getLogger("wren-ai-service")
 
-
+# SQL Breakdown System Prompt
+# This prompt instructs an LLM to break down SQL queries step by step, 
+# creating human-readable summaries for each part.
 sql_breakdown_system_prompt = """
 ### TASK ###
 You are a Trino SQL expert with exceptional logical thinking skills. 
@@ -28,79 +35,10 @@ You are going to break a complex SQL query into 1 to 10 steps to make it easier 
 Each step should have a SQL query part, a summary explaining the purpose of that query, and a CTE name to link the queries.
 Also, you need to give a short description describing the purpose of the original SQL query.
 Description and summary in each step MUST BE in the same language as the user's question.
-
-### SQL QUERY BREAKDOWN INSTRUCTIONS ###
-- YOU MUST BREAK DOWN any SQL query into small steps if there is JOIN operations or sub-queries.
-- ONLY USE the tables and columns mentioned in the original sql query.
-- ONLY CHOOSE columns belong to the tables mentioned in the database schema.
-- ALWAYS USE alias for tables and referenced CTEs.
-- ALWAYS SHOW alias for columns and tables such as SELECT [column_name] AS [alias_column_name].
-- MUST USE alias from the original SQL query.
-
-### SUMMARY AND DESCRIPTION INSTRUCTIONS ###
-- SUMMARY AND DESCRIPTION MUST USE the same language as the user's question
-- SUMMARY AND DESCRIPTION MUST BE human-readable and easy to understand.
-- SUMMARY AND DESCRIPTION MUST BE concise and to the point.
-
-### EXAMPLES ###
-Example 1:
-Original SQL Query:
-
-SELECT product_id, SUM(sales) AS total_sales
-FROM sales_data
-GROUP BY product_id
-HAVING SUM(sales) > 10000;
-
-Results:
-
-- Description: The breakdown simplifies the process of aggregating sales data by product and filtering for top-selling products.
-- Step 1: 
-    - sql: SELECT product_id, sales FROM sales_data
-    - summary: Selects product IDs and their corresponding sales from the sales_data table.
-    - cte_name: basic_sales_data
-- Step 2:
-    - sql: SELECT product_id, SUM(sales) AS total_sales FROM basic_sales_data GROUP BY product_id
-    - summary: Aggregates sales by product, summing up sales for each product ID.
-    - cte_name: aggregated_sales
-- Step 3:
-    - sql: SELECT product_id, total_sales FROM aggregated_sales WHERE total_sales > 10000
-    - summary: Filters the aggregated sales data to only include products whose total sales exceed 10,000.
-    - cte_name: <empty_string>
-
-Example 2:
-Original SQL Query:
-
-SELECT product_id FROM sales_data
-
-Results:
-
-- Description: The breakdown simplifies the process of selecting product IDs from the sales_data table.
-- Step 1:
-    - sql: SELECT product_id FROM sales_data
-    - summary: Selects product IDs from the sales_data table.
-    - cte_name: <empty_string>
-
-### FINAL ANSWER FORMAT ###
-The final answer must be a valid JSON format as following:
-
-{
-    "description": <SHORT_SQL_QUERY_DESCRIPTION_USING_SAME_LANGUAGE_USER_QUESTION_USING>,
-    "steps: [
-        {
-            "sql": <SQL_QUERY_STRING_1>,
-            "summary": <SUMMARY_STRING_USING_SAME_LANGUAGE_USER_QUESTION_USING_1>,
-            "cte_name": <CTE_NAME_STRING_1>
-        },
-        {
-            "sql": <SQL_QUERY_STRING_2>,
-            "summary": <SUMMARY_STRING_USING_SAME_LANGUAGE_USER_QUESTION_USING_2>,
-            "cte_name": <CTE_NAME_STRING_2>
-        },
-        ...
-    ] # a list of steps
-}
+...
 """
 
+# Template for the user prompt when the SQL breakdown is generated
 sql_breakdown_user_prompt_template = """
 ### INPUT ###
 User's Question: {{ query }}
@@ -109,23 +47,47 @@ SQL query: {{ sql }}
 Let's think step by step.
 """
 
-
 ## Start of Pipeline
+
+# Prompt Function: Constructs the prompt used for breakdown
 @timer
 @observe(capture_input=False)
 def prompt(query: str, sql: str, prompt_builder: PromptBuilder) -> dict:
+    """
+    Build a prompt based on the user's query and SQL query for breakdown.
+    
+    Args:
+        query (str): The user's question or query.
+        sql (str): The SQL query to break down.
+        prompt_builder (PromptBuilder): The builder for generating the prompt.
+        
+    Returns:
+        dict: A dictionary containing the prompt.
+    """
     logger.debug(f"query: {query}")
     logger.debug(f"sql: {sql}")
     return prompt_builder.run(query=query, sql=sql)
 
 
+# SQL Breakdown Generation Function: Handles actual SQL query breakdown using the generator
 @async_timer
 @observe(as_type="generation", capture_input=False)
 async def generate_sql_details(prompt: dict, generator: Any) -> dict:
+    """
+    Generate SQL breakdown based on the provided prompt.
+    
+    Args:
+        prompt (dict): The constructed prompt for SQL breakdown.
+        generator (Any): The generator used to generate the SQL breakdown.
+        
+    Returns:
+        dict: The SQL breakdown details.
+    """
     logger.debug(f"prompt: {orjson.dumps(prompt, option=orjson.OPT_INDENT_2).decode()}")
     return await generator.run(prompt=prompt.get("prompt"))
 
 
+# Post-Processing Function: Process the breakdown results and format them
 @async_timer
 @observe(capture_input=False)
 async def post_process(
@@ -133,6 +95,17 @@ async def post_process(
     post_processor: SQLBreakdownGenPostProcessor,
     project_id: str | None = None,
 ) -> dict:
+    """
+    Process the SQL breakdown details and apply any post-processing logic.
+    
+    Args:
+        generate_sql_details (dict): The details generated by the LLM for SQL breakdown.
+        post_processor (SQLBreakdownGenPostProcessor): The post-processor for the breakdown.
+        project_id (str, optional): Optional project ID for tracking.
+        
+    Returns:
+        dict: The post-processed SQL breakdown.
+    """
     logger.debug(
         f"generate_sql_details: {orjson.dumps(generate_sql_details, option=orjson.OPT_INDENT_2).decode()}"
     )
@@ -140,16 +113,19 @@ async def post_process(
         generate_sql_details.get("replies"), project_id=project_id
     )
 
-
 ## End of Pipeline
 
 
+# SQL Breakdown Class
+# This class defines the SQL breakdown pipeline, which consists of the 
+# generator, prompt builder, and post-processor. The run method executes the pipeline.
 class SQLBreakdown(BasicPipeline):
     def __init__(
         self,
         llm_provider: LLMProvider,
         engine: Engine,
     ):
+        # Initialize the components needed for SQL Breakdown (LLM, prompt builder, post processor)
         self._components = {
             "generator": llm_provider.get_generator(
                 system_prompt=sql_breakdown_system_prompt,
@@ -164,7 +140,16 @@ class SQLBreakdown(BasicPipeline):
             AsyncDriver({}, sys.modules[__name__], result_builder=base.DictResult())
         )
 
+    # Visualization method: Generates a visualization of the pipeline execution
     def visualize(self, query: str, sql: str, project_id: str | None = None) -> None:
+        """
+        Visualize the SQL breakdown pipeline execution.
+        
+        Args:
+            query (str): The user's question or query.
+            sql (str): The SQL query to break down.
+            project_id (str, optional): Optional project ID for tracking.
+        """
         destination = "outputs/pipelines/generation"
         if not Path(destination).exists():
             Path(destination).mkdir(parents=True, exist_ok=True)
@@ -182,9 +167,21 @@ class SQLBreakdown(BasicPipeline):
             orient="LR",
         )
 
+    # Execution method: Runs the SQL breakdown pipeline asynchronously
     @async_timer
     @observe(name="SQL Breakdown Generation")
     async def run(self, query: str, sql: str, project_id: str | None = None) -> dict:
+        """
+        Run the SQL breakdown pipeline.
+        
+        Args:
+            query (str): The user's question or query.
+            sql (str): The SQL query to break down.
+            project_id (str, optional): Optional project ID for tracking.
+            
+        Returns:
+            dict: The result of the SQL breakdown.
+        """
         logger.info("SQL Breakdown Generation pipeline is running...")
         return await self._pipe.execute(
             ["post_process"],
@@ -197,6 +194,7 @@ class SQLBreakdown(BasicPipeline):
         )
 
 
+# Script Entry Point for running and visualizing the SQL Breakdown pipeline
 if __name__ == "__main__":
     from langfuse.decorators import langfuse_context
 
@@ -204,16 +202,21 @@ if __name__ == "__main__":
     from src.core.pipeline import async_validate
     from src.utils import init_langfuse, init_providers, load_env_vars
 
-    load_env_vars()
-    init_langfuse()
+    load_env_vars()  # Load environment variables
+    init_langfuse()  # Initialize Langfuse observability
 
+    # Initialize LLM provider and engine
     llm_provider, _, _, engine = init_providers(EngineConfig())
     pipeline = SQLBreakdown(
         llm_provider=llm_provider,
         engine=engine,
     )
 
+    # Visualize the SQL breakdown
     pipeline.visualize("", "SELECT * FROM table_name")
+    
+    # Run the pipeline asynchronously
     async_validate(lambda: pipeline.run("", "SELECT * FROM table_name"))
 
+    # Ensure that the Langfuse context is flushed to capture logs and tracing data
     langfuse_context.flush()

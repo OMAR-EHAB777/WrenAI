@@ -78,13 +78,22 @@ table_columns_selection_user_prompt_template = """
 def _build_table_ddl(
     content: dict, columns: Optional[set[str]] = None, tables: Optional[set[str]] = None
 ) -> str:
+    """
+    Constructs the Data Definition Language (DDL) statement for creating a table.
+
+    Parameters:
+    - content (dict): Contains details about the table's columns and foreign keys.
+    - columns (Optional[set[str]]): A set of column names to filter specific columns for the DDL statement.
+    - tables (Optional[set[str]]): A set of table names to filter the foreign keys for the DDL statement.
+
+    Returns:
+    - str: The DDL statement to create the table with the filtered columns and foreign keys.
+    """
     columns_ddl = []
     for column in content["columns"]:
         if column["type"] == "COLUMN":
             if not columns or (columns and column["name"] in columns):
-                column_ddl = (
-                    f"{column['comment']}{column['name']} {column['data_type']}"
-                )
+                column_ddl = f"{column['comment']}{column['name']} {column['data_type']}"
                 if column["is_primary_key"]:
                     column_ddl += " PRIMARY KEY"
                 columns_ddl.append(column_ddl)
@@ -92,36 +101,55 @@ def _build_table_ddl(
             if not tables or (tables and set(column["tables"]).issubset(tables)):
                 columns_ddl.append(f"{column['comment']}{column['constraint']}")
 
-    return (
-        f"{content['comment']}CREATE TABLE {content['name']} (\n  "
-        + ",\n  ".join(columns_ddl)
-        + "\n);"
-    )
+    return f"{content['comment']}CREATE TABLE {content['name']} (\n  " + ",\n  ".join(columns_ddl) + "\n);"
 
 
 def _build_metric_ddl(content: dict) -> str:
+    """
+    Constructs the DDL statement for creating a metric table.
+
+    Parameters:
+    - content (dict): Contains details about the metric's dimensions and measures.
+
+    Returns:
+    - str: The DDL statement to create the metric table.
+    """
     columns_ddl = [
         f"{column['comment']}{column['name']} {column['data_type']}"
         for column in content["columns"]
     ]
 
-    return (
-        f"{content['comment']}CREATE TABLE {content['name']} (\n  "
-        + ",\n  ".join(columns_ddl)
-        + "\n);"
-    )
+    return f"{content['comment']}CREATE TABLE {content['name']} (\n  " + ",\n  ".join(columns_ddl) + "\n);"
 
 
 def _build_view_ddl(content: dict) -> str:
-    return (
-        f"{content['comment']}CREATE VIEW {content['name']}\nAS {content['statement']}"
-    )
+    """
+    Constructs the DDL statement for creating a database view.
+
+    Parameters:
+    - content (dict): Contains details about the view's statement and metadata.
+
+    Returns:
+    - str: The DDL statement to create the view.
+    """
+    return f"{content['comment']}CREATE VIEW {content['name']}\nAS {content['statement']}"
 
 
 ## Start of Pipeline
+
 @async_timer
 @observe(capture_input=False, capture_output=False)
 async def embedding(query: str, embedder: Any) -> dict:
+    """
+    Embeds a query string using the provided embedder component.
+
+    Parameters:
+    - query (str): The query to be embedded.
+    - embedder (Any): The embedder component used to generate the embedding.
+
+    Returns:
+    - dict: The embedding result for the given query.
+    """
     logger.debug(f"query: {query}")
     return await embedder.run(query)
 
@@ -129,6 +157,17 @@ async def embedding(query: str, embedder: Any) -> dict:
 @async_timer
 @observe(capture_input=False)
 async def table_retrieval(embedding: dict, id: str, table_retriever: Any) -> dict:
+    """
+    Retrieves the table descriptions using the query embedding and filters based on the project ID.
+
+    Parameters:
+    - embedding (dict): The query embedding.
+    - id (str): The project ID for filtering.
+    - table_retriever (Any): The retriever component used to retrieve table descriptions.
+
+    Returns:
+    - dict: The retrieved table descriptions.
+    """
     filters = {
         "operator": "AND",
         "conditions": [
@@ -137,9 +176,7 @@ async def table_retrieval(embedding: dict, id: str, table_retriever: Any) -> dic
     }
 
     if id:
-        filters["conditions"].append(
-            {"field": "project_id", "operator": "==", "value": id}
-        )
+        filters["conditions"].append({"field": "project_id", "operator": "==", "value": id})
 
     return await table_retriever.run(
         query_embedding=embedding.get("embedding"),
@@ -152,6 +189,18 @@ async def table_retrieval(embedding: dict, id: str, table_retriever: Any) -> dic
 async def dbschema_retrieval(
     table_retrieval: dict, embedding: dict, id: str, dbschema_retriever: Any
 ) -> list[Document]:
+    """
+    Retrieves the database schema for the tables retrieved in the previous step.
+
+    Parameters:
+    - table_retrieval (dict): The result of the table retrieval step.
+    - embedding (dict): The query embedding.
+    - id (str): The project ID for filtering.
+    - dbschema_retriever (Any): The retriever component used to retrieve the database schema.
+
+    Returns:
+    - list[Document]: A list of documents representing the retrieved database schema.
+    """
     tables = table_retrieval.get("documents", [])
     table_names = []
     for table in tables:
@@ -174,26 +223,33 @@ async def dbschema_retrieval(
     }
 
     if id:
-        filters["conditions"].append(
-            {"field": "project_id", "operator": "==", "value": id}
-        )
+        filters["conditions"].append({"field": "project_id", "operator": "==", "value": id})
 
-    results = await dbschema_retriever.run(
-        query_embedding=embedding.get("embedding"), filters=filters
-    )
+    results = await dbschema_retriever.run(query_embedding=embedding.get("embedding"), filters=filters)
     return results["documents"]
 
 
 @timer
 @observe()
 def construct_db_schemas(dbschema_retrieval: list[Document]) -> list[dict]:
+    """
+    Constructs database schemas by aggregating the retrieved documents.
+
+    Parameters:
+    - dbschema_retrieval (list[Document]): A list of documents containing schema information.
+
+    Returns:
+    - list[dict]: A list of constructed database schemas with full details about tables and columns.
+    """
     db_schemas = {}
     for document in dbschema_retrieval:
         content = ast.literal_eval(document.content)
         if content["type"] == "TABLE":
+            # Check if the table is not already in the db_schemas, if not add it
             if document.meta["name"] not in db_schemas:
                 db_schemas[document.meta["name"]] = content
             else:
+                # Merge with the existing table content
                 db_schemas[document.meta["name"]] = {
                     **content,
                     "columns": db_schemas[document.meta["name"]]["columns"],
@@ -207,7 +263,7 @@ def construct_db_schemas(dbschema_retrieval: list[Document]) -> list[dict]:
                 else:
                     db_schemas[document.meta["name"]]["columns"] += content["columns"]
 
-    # remove incomplete schemas
+    # Remove incomplete schemas (schemas without both type and columns)
     db_schemas = {k: v for k, v in db_schemas.items() if "type" in v and "columns" in v}
 
     return list(db_schemas.values())
@@ -218,6 +274,17 @@ def construct_db_schemas(dbschema_retrieval: list[Document]) -> list[dict]:
 def prompt(
     query: str, construct_db_schemas: list[dict], prompt_builder: PromptBuilder
 ) -> dict:
+    """
+    Generates a prompt using the constructed database schemas for querying.
+
+    Parameters:
+    - query (str): The user's original query.
+    - construct_db_schemas (list[dict]): The constructed database schemas.
+    - prompt_builder (PromptBuilder): The prompt builder component used to format the query.
+
+    Returns:
+    - dict: The formatted prompt for querying.
+    """
     logger.info(f"db_schemas: {construct_db_schemas}")
 
     db_schemas = [
@@ -233,6 +300,16 @@ def prompt(
 async def filter_columns_in_tables(
     prompt: dict, table_columns_selection_generator: Any
 ) -> dict:
+    """
+    Filters the columns in the tables based on the generated prompt and returns the filtered results.
+
+    Parameters:
+    - prompt (dict): The generated prompt for filtering columns.
+    - table_columns_selection_generator (Any): The generator used to filter columns.
+
+    Returns:
+    - dict: The filtered columns and table results.
+    """
     logger.debug(f"prompt: {prompt}")
     return await table_columns_selection_generator.run(prompt=prompt.get("prompt"))
 
@@ -244,6 +321,17 @@ def construct_retrieval_results(
     construct_db_schemas: list[dict],
     dbschema_retrieval: list[Document],
 ) -> list[str]:
+    """
+    Constructs the final retrieval results by filtering columns and tables based on the filtered columns data.
+
+    Parameters:
+    - filter_columns_in_tables (dict): The filtered column results.
+    - construct_db_schemas (list[dict]): The constructed database schemas.
+    - dbschema_retrieval (list[Document]): The original retrieval results for the database schema.
+
+    Returns:
+    - list[str]: The final list of retrieval results in DDL format.
+    """
     columns_and_tables_needed = orjson.loads(filter_columns_in_tables["replies"][0])[
         "results"
     ]
@@ -285,6 +373,23 @@ def construct_retrieval_results(
 
 
 class Retrieval(BasicPipeline):
+    """
+    The `Retrieval` pipeline class is responsible for querying and retrieving table and schema information from the 
+    document store based on a user's query. This class utilizes language models (LLMs) for table column selection 
+    and embedding-based retrieval.
+
+    Components:
+    - `embedder`: The component responsible for creating query embeddings using an LLM-based text embedder.
+    - `table_retriever`: Retrieves relevant table descriptions from the document store.
+    - `dbschema_retriever`: Retrieves database schemas (tables and columns) from the document store.
+    - `table_columns_selection_generator`: A language model generator used to select relevant columns for retrieval.
+    - `prompt_builder`: Formats user queries and context into a structured prompt for the language model.
+    
+    Configuration:
+    - `table_retrieval_size`: Number of top-K results to retrieve for table descriptions.
+    - `table_column_retrieval_size`: Number of top-K results to retrieve for table columns.
+    """
+
     def __init__(
         self,
         llm_provider: LLMProvider,
@@ -320,6 +425,14 @@ class Retrieval(BasicPipeline):
         query: str,
         id: Optional[str] = None,
     ) -> None:
+        """
+        Visualizes the pipeline execution flow for the given query. This generates a diagram of how data flows through 
+        the pipeline's components and how table and schema information are retrieved.
+
+        Parameters:
+        - query (str): The user query to visualize.
+        - id (Optional[str]): The project ID (if applicable) to filter the retrieved data.
+        """
         destination = "outputs/pipelines/retrieval"
         if not Path(destination).exists():
             Path(destination).mkdir(parents=True, exist_ok=True)
@@ -339,6 +452,17 @@ class Retrieval(BasicPipeline):
     @async_timer
     @observe(name="Ask Retrieval")
     async def run(self, query: str, id: Optional[str] = None):
+        """
+        Runs the pipeline to execute the retrieval process. This includes embedding the query, retrieving the 
+        relevant tables and schemas, and constructing the final retrieval results.
+
+        Parameters:
+        - query (str): The user query.
+        - id (Optional[str]): The project ID to filter the documents by.
+
+        Returns:
+        - dict: The final set of retrieved results, including schema information in DDL format.
+        """
         logger.info("Ask Retrieval pipeline is running...")
         return await self._pipe.execute(
             ["construct_retrieval_results"],
@@ -360,14 +484,18 @@ if __name__ == "__main__":
     load_env_vars()
     init_langfuse()
 
+    # Initialize required providers
     _, embedder_provider, document_store_provider, _ = init_providers(
         engine_config=EngineConfig()
     )
+    
+    # Initialize the Retrieval pipeline
     pipeline = Retrieval(
         embedder_provider=embedder_provider,
         document_store_provider=document_store_provider,
     )
 
+    # Visualize and run the pipeline
     pipeline.visualize("this is a query")
     async_validate(lambda: pipeline.run("this is a query"))
 
