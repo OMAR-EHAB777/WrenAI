@@ -18,6 +18,9 @@ from src.utils import remove_trailing_slash
 
 logger = logging.getLogger("wren-ai-service")
 
+# This file defines an Azure OpenAI-based provider for generating language model responses asynchronously.
+# The file includes both the generator and provider classes, enabling text generation and interaction with the Azure OpenAI API.
+
 GENERATION_MODEL = "gpt-4-turbo"
 GENERATION_MODEL_KWARGS = {
     "temperature": 0,
@@ -26,7 +29,7 @@ GENERATION_MODEL_KWARGS = {
     "response_format": {"type": "json_object"},
 }
 
-
+# AsyncGenerator class generates text using Azure OpenAI's models.
 @component
 class AsyncGenerator(AzureOpenAIGenerator):
     def __init__(
@@ -40,6 +43,7 @@ class AsyncGenerator(AzureOpenAIGenerator):
         generation_kwargs: Optional[Dict[str, Any]] = None,
         timeout: Optional[float] = None,
     ):
+        # Initializes the base generator class with the required API details and model parameters.
         super(AsyncGenerator, self).__init__(
             azure_endpoint=api_base,
             api_version=api_version,
@@ -58,6 +62,7 @@ class AsyncGenerator(AzureOpenAIGenerator):
             api_key=api_key.resolve_value(),
         )
 
+    # This method runs the text generation asynchronously by sending prompts to the Azure OpenAI service.
     @component.output_types(replies=List[str], meta=List[Dict[str, Any]])
     @backoff.on_exception(backoff.expo, openai.RateLimitError, max_time=60, max_tries=3)
     async def run(
@@ -73,7 +78,6 @@ class AsyncGenerator(AzureOpenAIGenerator):
             messages = [message]
 
         generation_kwargs = {**self.generation_kwargs, **(generation_kwargs or {})}
-
         openai_formatted_messages = [message.to_openai_format() for message in messages]
 
         completion: Union[
@@ -95,7 +99,6 @@ class AsyncGenerator(AzureOpenAIGenerator):
             chunks: List[StreamingChunk] = []
             chunk = None
 
-            # pylint: disable=not-an-iterable
             for chunk in completion:
                 if chunk.choices and self.streaming_callback:
                     chunk_delta: StreamingChunk = self._build_chunk(chunk)
@@ -106,7 +109,7 @@ class AsyncGenerator(AzureOpenAIGenerator):
             completions = [
                 self._build_message(completion, choice) for choice in completion.choices
             ]
-        # before returning, do post-processing of the completions
+
         for response in completions:
             self._check_finish_reason(response)
 
@@ -115,7 +118,7 @@ class AsyncGenerator(AzureOpenAIGenerator):
             "meta": [message.meta for message in completions],
         }
 
-
+# AzureOpenAILLMProvider class provides access to Azure OpenAI's language model for text generation.
 @provider("azure_openai_llm")
 class AzureOpenAILLMProvider(LLMProvider):
     def __init__(
@@ -133,6 +136,7 @@ class AzureOpenAILLMProvider(LLMProvider):
             float(os.getenv("LLM_TIMEOUT")) if os.getenv("LLM_TIMEOUT") else 120.0
         ),
     ):
+        # Initializes the provider class with Azure OpenAI configurations (API key, base, version, model, etc.)
         self._generation_api_key = chat_api_key
         self._generation_api_base = remove_trailing_slash(chat_api_base)
         self._generation_api_version = chat_api_version
@@ -146,6 +150,7 @@ class AzureOpenAILLMProvider(LLMProvider):
             f"Using AzureOpenAI LLM with API version: {self._generation_api_version}"
         )
 
+    # Returns an instance of the generator class based on the configurations set during initialization.
     def get_generator(
         self,
         system_prompt: Optional[str] = None,

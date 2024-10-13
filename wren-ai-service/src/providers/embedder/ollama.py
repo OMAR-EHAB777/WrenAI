@@ -16,12 +16,16 @@ from src.providers.loader import provider, pull_ollama_model
 from src.utils import remove_trailing_slash
 
 logger = logging.getLogger("wren-ai-service")
+# This file defines embedding components and provider for Ollama, which is a text/document embedding service.
+# The components interact with Ollama's embedding service API, creating embeddings for text or documents and preparing them for further downstream tasks.
+# The provider class simplifies the creation of the embedders and manages their configuration.
 
+# Constants for embedding service
 EMBEDDER_OLLAMA_URL = "http://localhost:11434"
 EMBEDDING_MODEL = "nomic-embed-text:latest"
 EMBEDDING_MODEL_DIMENSION = 768  # https://huggingface.co/nomic-ai/nomic-embed-text-v1.5
 
-
+# This component is an asynchronous text embedder that utilizes Ollama's API to generate embeddings for text inputs.
 @component
 class AsyncTextEmbedder(OllamaTextEmbedder):
     def __init__(
@@ -38,6 +42,7 @@ class AsyncTextEmbedder(OllamaTextEmbedder):
             timeout=timeout,
         )
 
+    # Output type defines the embedding (list of floats) and associated metadata (dictionary).
     @component.output_types(embedding=List[float], meta=Dict[str, Any])
     async def run(
         self,
@@ -45,9 +50,10 @@ class AsyncTextEmbedder(OllamaTextEmbedder):
         generation_kwargs: Optional[Dict[str, Any]] = None,
     ):
         logger.debug(f"Running Ollama text embedder with text: {text}")
-
+        # Prepare the JSON payload with text and generation configurations
         payload = self._create_json_payload(text, generation_kwargs)
 
+        # Timing and sending the request to Ollama API to generate embedding
         start = time.perf_counter()
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(self.timeout)
@@ -59,11 +65,13 @@ class AsyncTextEmbedder(OllamaTextEmbedder):
                 elapsed = time.perf_counter() - start
                 result = await response.json()
 
+        # Embedding metadata includes the model and duration for embedding generation
         result["meta"] = {"model": self.model, "duration": elapsed}
 
         return result
 
 
+# This component asynchronously embeds entire documents using Ollama's API and returns the document embeddings.
 @component
 class AsyncDocumentEmbedder(OllamaDocumentEmbedder):
     def __init__(
@@ -90,6 +98,7 @@ class AsyncDocumentEmbedder(OllamaDocumentEmbedder):
             embedding_separator=embedding_separator,
         )
 
+    # Embeds batches of texts (Ollama only supports single uploads, so each batch is processed individually)
     async def _embed_batch(
         self,
         texts_to_embed: List[str],
@@ -97,9 +106,8 @@ class AsyncDocumentEmbedder(OllamaDocumentEmbedder):
         generation_kwargs: Optional[Dict[str, Any]] = None,
     ):
         """
-        Ollama Embedding only allows single uploads, not batching. Currently the batch size is set to 1.
-        If this changes in the future, line 86 (the first line within the for loop), can contain:
-            batch = texts_to_embed[i + i + batch_size]
+        Ollama Embedding only allows single uploads, not batching. Currently, the batch size is set to 1.
+        If this changes in the future, we could modify the loop to process larger batches.
         """
 
         all_embeddings = []
@@ -113,7 +121,7 @@ class AsyncDocumentEmbedder(OllamaDocumentEmbedder):
                 disable=not self.progress_bar,
                 desc="Calculating embeddings",
             ):
-                batch = texts_to_embed[i]  # Single batch only
+                batch = texts_to_embed[i]  # Processing single text per batch
                 payload = self._create_json_payload(batch, generation_kwargs)
 
                 async with session.post(
@@ -133,6 +141,7 @@ class AsyncDocumentEmbedder(OllamaDocumentEmbedder):
     ):
         logger.debug(f"Running Ollama document embedder with documents: {documents}")
 
+        # Check if the input is a valid list of documents, otherwise raise a type error
         if (
             not isinstance(documents, list)
             or documents
@@ -144,19 +153,23 @@ class AsyncDocumentEmbedder(OllamaDocumentEmbedder):
             )
             raise TypeError(msg)
 
+        # Prepare the texts to be embedded
         texts_to_embed = self._prepare_texts_to_embed(documents=documents)
+        # Process the documents and generate embeddings
         embeddings, meta = await self._embed_batch(
             texts_to_embed=texts_to_embed,
             batch_size=self.batch_size,
             generation_kwargs=generation_kwargs,
         )
 
+        # Assign the generated embeddings to the documents
         for doc, emb in zip(documents, embeddings):
             doc.embedding = emb
 
         return {"documents": documents, "meta": meta}
 
 
+# Provider class for Ollama embedding service. It provides methods to get text and document embedders.
 @provider("ollama_embedder")
 class OllamaEmbedderProvider(EmbedderProvider):
     def __init__(
@@ -178,11 +191,13 @@ class OllamaEmbedderProvider(EmbedderProvider):
         self._embedding_model_dim = embedding_model_dim
         self._timeout = timeout
 
+        # Ensures the Ollama model is pulled and ready for embedding
         pull_ollama_model(self._url, self._embedding_model)
 
         logger.info(f"Using Ollama Embedding Model: {self._embedding_model}")
         logger.info(f"Using Ollama URL: {self._url}")
 
+    # Get an instance of the text embedder configured with the current settings
     def get_text_embedder(
         self,
         model_kwargs: Optional[Dict[str, Any]] = None,
@@ -194,6 +209,7 @@ class OllamaEmbedderProvider(EmbedderProvider):
             timeout=self._timeout,
         )
 
+    # Get an instance of the document embedder configured with the current settings
     def get_document_embedder(
         self,
         model_kwargs: Optional[Dict[str, Any]] = None,

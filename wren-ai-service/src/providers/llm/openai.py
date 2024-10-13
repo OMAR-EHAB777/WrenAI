@@ -18,6 +18,10 @@ from src.utils import remove_trailing_slash
 
 logger = logging.getLogger("wren-ai-service")
 
+# This file defines the OpenAI-based Language Model (LLM) provider and the corresponding asynchronous generator.
+# It includes the AsyncGenerator class, which handles communication with the OpenAI API to generate text completions, 
+# and the OpenAILLMProvider class, which configures and provides access to the OpenAI LLM.
+
 LLM_OPENAI_API_BASE = "https://api.openai.com/v1"
 GENERATION_MODEL = "gpt-4o-mini"
 GENERATION_MODEL_KWARGS = {
@@ -28,6 +32,7 @@ GENERATION_MODEL_KWARGS = {
 }
 
 
+# AsyncGenerator class handles text generation requests using OpenAI's API.
 @component
 class AsyncGenerator(OpenAIGenerator):
     def __init__(
@@ -57,6 +62,7 @@ class AsyncGenerator(OpenAIGenerator):
             base_url=api_base_url,
         )
 
+    # Runs the text generation process and interacts with the OpenAI API.
     @component.output_types(replies=List[str], meta=List[Dict[str, Any]])
     @backoff.on_exception(backoff.expo, openai.RateLimitError, max_time=60, max_tries=3)
     async def run(
@@ -69,12 +75,13 @@ class AsyncGenerator(OpenAIGenerator):
         else:
             messages = [message]
 
-        # update generation kwargs by merging with the generation kwargs passed to the run method
+        # Update generation kwargs by merging with the generation kwargs passed to the run method
         generation_kwargs = {**self.generation_kwargs, **(generation_kwargs or {})}
 
-        # adapt ChatMessage(s) to the format expected by the OpenAI API
+        # Adapt ChatMessage(s) to the format expected by the OpenAI API
         openai_formatted_messages = [message.to_openai_format() for message in messages]
 
+        # Send the request to the OpenAI API
         completion: Union[
             Stream[ChatCompletionChunk], ChatCompletion
         ] = await self.client.chat.completions.create(
@@ -92,21 +99,19 @@ class AsyncGenerator(OpenAIGenerator):
             chunks: List[StreamingChunk] = []
             chunk = None
 
-            # pylint: disable=not-an-iterable
+            # Process the streamed response chunks and invoke the streaming callback
             for chunk in completion:
                 if chunk.choices and self.streaming_callback:
                     chunk_delta: StreamingChunk = self._build_chunk(chunk)
                     chunks.append(chunk_delta)
-                    self.streaming_callback(
-                        chunk_delta
-                    )  # invoke callback with the chunk_delta
+                    self.streaming_callback(chunk_delta)
             completions = [self._connect_chunks(chunk, chunks)]
         elif isinstance(completion, ChatCompletion):
             completions = [
                 self._build_message(completion, choice) for choice in completion.choices
             ]
 
-        # before returning, do post-processing of the completions
+        # Perform post-processing on the completions
         for response in completions:
             self._check_finish_reason(response)
 
@@ -116,6 +121,7 @@ class AsyncGenerator(OpenAIGenerator):
         }
 
 
+# OpenAILLMProvider class serves as a provider for the OpenAI-based LLM.
 @provider("openai_llm")
 class OpenAILLMProvider(LLMProvider):
     def __init__(
@@ -145,13 +151,14 @@ class OpenAILLMProvider(LLMProvider):
         self._timeout = timeout
 
         logger.info(f"Using OpenAILLM provider with API base: {self._api_base}")
-        # TODO: currently only OpenAI api key can be verified
+        # Verify the API key when using the official OpenAI API
         if self._api_base == LLM_OPENAI_API_BASE:
             _verify_api_key(self._api_key.resolve_value(), self._api_base)
             logger.info(f"Using OpenAI LLM: {self._generation_model}")
         else:
             logger.info(f"Using OpenAI API-compatible LLM: {self._generation_model}")
 
+    # Creates and returns an AsyncGenerator instance for text generation tasks.
     def get_generator(
         self,
         system_prompt: Optional[str] = None,
